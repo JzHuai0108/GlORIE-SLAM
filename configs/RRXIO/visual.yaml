@@ -1,0 +1,50 @@
+inherit_from: ./configs/RRXIO/rrxio.yaml
+
+scene: mocap_easy
+only_tracking: False
+offline_mapping: False
+offline_video: video.npz
+wandb: False
+
+stride: 2
+max_frames: -1
+
+mapping:
+  iters: 150
+
+setting: demo
+
+data:
+  input_folder: "/media/pi/BackupPlus/jhuai/data/rrxio/irs_rtvi_datasets_2021/mocap_easy"
+  modality: 'visual'
+
+cam:
+  raw:
+    fx: 372.51
+    fy: 372.51
+    cx: 318.77
+    cy: 253.24
+    k1: 0.013404032824313381
+    k2: 0.013570186060580948
+    k3: -0.011005228038287808
+    k4: 0.0040591597486
+    W: 640
+    H: 512
+    png_depth_scale: 500.0
+    distorted: True
+    distortion_model: 'equidistant'
+   # K optimal obtained by cv2.fisheye.estimateNewCameraMatrixForUndistortRectify() with balance=0.0
+  opt:
+    fx: 315.93052466
+    fy: 315.93052466
+    cx: 318.24482797
+    cy: 252.56753124
+    k1: 0.0
+    k2: 0.0
+    k3: 0.0
+    k4: 0.0
+    W: 640
+    H: 512
+    png_depth_scale: 500.0
+    distorted: False
+    distortion_model: ''

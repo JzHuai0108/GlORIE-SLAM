@@ -86,6 +86,18 @@ pip install thirdparty/evaluate_3d_reconstruction_lib
 python setup.py install
 ```
 
+### Troubleshooting
+* faiss assertion error
+```commandline
+pip uninstall faiss-gpu
+conda install -c pytorch faiss-gpu
+```
+* latex type1cm.sty not found error
+```commandline
+sudo apt install cm-super
+sudo apt-get install dvipng
+```
+
 4. Download pretrained model.
 Download the pretained models from [Google Drive](https://drive.google.com/file/d/1oZbVPrubtaIUjRRuT8F-YjjHBW-1spKT/view?usp=drive_link), unzip them inside the `pretrained` folder.
 <details>

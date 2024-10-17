@@ -25,3 +25,4 @@ eval_ssim
 output
 
 configs/local
+.idea/

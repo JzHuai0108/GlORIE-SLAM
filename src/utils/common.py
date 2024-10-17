@@ -380,9 +380,14 @@ def update_cam(cfg):
     such as resize or edge crop
     """
     # resize the input images to crop_size(variable name used in lietorch)
-    H, W = cfg['cam']['H'], cfg['cam']['W']
-    fx, fy = cfg['cam']['fx'], cfg['cam']['fy']
-    cx, cy = cfg['cam']['cx'], cfg['cam']['cy']
+    if 'opt' in cfg['cam']:
+        H, W = cfg['cam']['opt']['H'], cfg['cam']['opt']['W']
+        fx, fy = cfg['cam']['opt']['fx'], cfg['cam']['opt']['fy']
+        cx, cy = cfg['cam']['opt']['cx'], cfg['cam']['opt']['cy']
+    else:
+        H, W = cfg['cam']['H'], cfg['cam']['W']
+        fx, fy = cfg['cam']['fx'], cfg['cam']['fy']
+        cx, cy = cfg['cam']['cx'], cfg['cam']['cy']
 
     h_edge, w_edge = cfg['cam']['H_edge'], cfg['cam']['W_edge']
     H_out, W_out = cfg['cam']['H_out'], cfg['cam']['W_out']
