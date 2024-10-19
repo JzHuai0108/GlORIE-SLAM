@@ -66,8 +66,6 @@ class RRXIOParser:
         tstamp_depth = depth_data[:, 0].astype(np.float64)
         tstamp_pose = pose_data[:, 0].astype(np.float64)
         associations = self.associate_frames(tstamp_image, tstamp_depth, tstamp_pose, max_dt)
-        print('Found {} associations out of {} images, {} depth images and {} poses'.format(
-                len(associations), len(tstamp_image), len(tstamp_depth), len(tstamp_pose)))
 
         indicies = [0]
         for i in range(1, len(associations)):
@@ -77,6 +75,8 @@ class RRXIOParser:
                 indicies += [i]
 
         self.color_paths, self.poses, self.depth_paths, self.frames = [], [], [], []
+        print('Found {} associations out of {} images, {} depth images and {} poses, keeping {} matches.'.format(
+                len(associations), len(tstamp_image), len(tstamp_depth), len(tstamp_pose), len(indicies)))
 
         for ix in indicies:
             (i, j, k) = associations[ix]

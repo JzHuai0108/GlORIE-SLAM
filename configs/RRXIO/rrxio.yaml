@@ -14,11 +14,11 @@ mapping:
   iters: 300
 
 tracking:
-  buffer: 1200
+  buffer: 800
   beta: 0.75
   warmup: 12
   motion_filter:
-    thresh: 4.0  
+    thresh: 4.0
   multiview_filter:
     thresh: 0.03  
     visible_num: 2  

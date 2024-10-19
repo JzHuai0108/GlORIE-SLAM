@@ -5,7 +5,7 @@ import droid_backends
 import src.geom.ba
 from torch.multiprocessing import Value
 
-from src.modules.droid_net import cvx_upsample
+from src.modules.droid_net import cvx_upsample, cvx_upsample_pow
 import src.geom.projective_ops as pops
 from src.utils.common import align_scale_and_shift
 from src.utils.Printer import FontColor
@@ -39,6 +39,9 @@ class DepthVideo:
         self.disps = torch.ones(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.zeros = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.disps_up = torch.zeros(buffer, ht, wd, device=self.device, dtype=torch.float).share_memory_()
+        self.depths_cov = torch.zeros(buffer, ht // self.down_scale, wd // self.down_scale, device=self.device,
+                                dtype=torch.float).share_memory_()
+        self.depths_cov_up = torch.zeros(buffer, ht, wd, device=self.device, dtype=torch.float).share_memory_()
         self.intrinsics = torch.zeros(buffer, 4, device=self.device, dtype=torch.float).share_memory_()
         self.mono_disps = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.depth_scale = torch.zeros(buffer,device=self.device, dtype=torch.float).share_memory_()
@@ -142,6 +145,8 @@ class DepthVideo:
 
         disps_up = cvx_upsample(self.disps[ix].unsqueeze(-1), mask)
         self.disps_up[ix] = disps_up.squeeze()
+        depth_cov_up = cvx_upsample_pow(self.depths_cov[ix].unsqueeze(-1), mask, pow=1.0)
+        self.depths_cov_up[ix] = depth_cov_up.squeeze()
 
     def normalize(self):
         """ normalize depth and poses """
@@ -149,6 +154,7 @@ class DepthVideo:
         with self.get_lock():
             s = self.disps[:self.counter.value].mean()
             self.disps[:self.counter.value] /= s
+            self.depths_cov[:self.counter.value] *= (s**2)
             self.poses[:self.counter.value,:3] *= s
             self.set_dirty(0,self.counter.value)
 
@@ -214,9 +220,14 @@ class DepthVideo:
             if opt_type == "pose_depth":
                 target = target.view(-1, self.ht//self.down_scale, self.wd//self.down_scale, 2).permute(0,3,1,2).contiguous()
                 weight = weight.view(-1, self.ht//self.down_scale, self.wd//self.down_scale, 2).permute(0,3,1,2).contiguous()
-                droid_backends.ba(self.poses, self.disps, self.intrinsics[0], self.zeros,
+                dx, dz, disp_cov = droid_backends.ba(self.poses, self.disps, self.intrinsics[0], self.zeros,
                     target, weight, eta, ii, jj, t0, t1, itrs, lm, ep, motion_only, False)
                 self.disps.clamp_(min=1e-5)
+                kf_ids, _ = torch.sort(torch.unique(ii))
+                ht, wd = self.ht//self.down_scale, self.wd//self.down_scale
+                for i, kx in enumerate(kf_ids):
+                    depth_cov = disp_cov[i].view(ht, wd) / self.disps[kx]**4
+                    self.depths_cov[kx] = depth_cov
                 return True
 
             elif opt_type == "depth_scale":
@@ -322,7 +333,12 @@ class DepthVideo:
             depth_mask = self.valid_depth_mask[index].clone().to(device)
             c2w = self.get_pose(index,device)
         return est_depth, depth_mask, c2w
-    
+
+    def get_depth_cov(self,index,device):
+        with self.get_lock():
+            depth_cov = self.depths_cov_up[index].clone().to(device)  # [h, w]
+        return depth_cov
+
     @torch.no_grad()
     def update_valid_depth_mask(self,up=True):
         '''
@@ -367,19 +383,23 @@ class DepthVideo:
     def save_video(self,path:str):
         poses = []
         depths = []
+        depth_covs = []
         timestamps = []
         valid_depth_masks = []
         for i in range(self.counter.value):
             depth, depth_mask, pose = self.get_depth_and_pose(i,'cpu')
+            depth_cov = self.get_depth_cov(i, 'cpu')
             timestamp = self.timestamp[i].cpu()
             poses.append(pose)
             depths.append(depth)
+            depth_covs.append(depth_cov)
             timestamps.append(timestamp)
             valid_depth_masks.append(depth_mask)
         poses = torch.stack(poses,dim=0).numpy()
         depths = torch.stack(depths,dim=0).numpy()
+        depth_covs = torch.stack(depth_covs,dim=0).numpy()
         timestamps = torch.stack(timestamps,dim=0).numpy() 
         valid_depth_masks = torch.stack(valid_depth_masks,dim=0).numpy()       
-        np.savez(path,poses=poses,depths=depths,timestamps=timestamps,valid_depth_masks=valid_depth_masks)
+        np.savez(path,poses=poses,depths=depths,depth_covs=depth_covs,timestamps=timestamps,valid_depth_masks=valid_depth_masks)
         self.printer.print(f"Saved final depth video: {path}",FontColor.INFO)
 

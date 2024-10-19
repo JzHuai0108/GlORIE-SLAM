@@ -1330,7 +1330,7 @@ std::vector<torch::Tensor> ba_cuda(
     const bool depth_only)
 {
   auto opts = poses.options();
-  const int num = ii.size(0);
+  const int num = ii.size(0); // jhuai:  the number of frame pairs involved in the optimization.
   const int ht = disps.size(1);
   const int wd = disps.size(2);
 
@@ -1341,19 +1341,21 @@ std::vector<torch::Tensor> ba_cuda(
   std::tuple<torch::Tensor, torch::Tensor> kuniq = 
     torch::_unique(ii_exp, true, true);
 
-  torch::Tensor kx = std::get<0>(kuniq);
-  torch::Tensor kk_exp = std::get<1>(kuniq);
+  torch::Tensor kx = std::get<0>(kuniq);  // jhuai: new indices for unique frames
+  torch::Tensor kk_exp = std::get<1>(kuniq); // jhuai: new indices for residual blocks
     
   torch::Tensor dx;
   torch::Tensor dz;
 
   // initialize buffers
-  torch::Tensor Hs = torch::zeros({4, num, 6, 6}, opts);
-  torch::Tensor vs = torch::zeros({2, num, 6}, opts);
-  torch::Tensor Eii = torch::zeros({num, 6, ht*wd}, opts);
-  torch::Tensor Eij = torch::zeros({num, 6, ht*wd}, opts);
-  torch::Tensor Cii = torch::zeros({num, ht*wd}, opts);
-  torch::Tensor wi = torch::zeros({num, ht*wd}, opts);
+  torch::Tensor Hs = torch::zeros({4, num, 6, 6}, opts);  // jhuai: 4 = 2x2 Hessian blocks for each frame pair (i, j)
+  torch::Tensor vs = torch::zeros({2, num, 6}, opts);  // jhuai: the gradient vectors for each frame pair (i, j)
+  torch::Tensor Eii = torch::zeros({num, 6, ht*wd}, opts);  // jhuai: the Hessian blocks for frame i and disparity
+  torch::Tensor Eij = torch::zeros({num, 6, ht*wd}, opts);  // jhuai: the Hessian blocks for frame j and disparity
+  torch::Tensor Cii = torch::zeros({num, ht*wd}, opts);  // jhuai: the Hessian blocks for disparity
+  torch::Tensor wi = torch::zeros({num, ht*wd}, opts);  // jhuai: the gradient vectors for disparity
+  torch::Tensor delta_cov = torch::zeros({kx.size(0), ht*wd}, opts);
+  torch::Tensor Q = torch::zeros({kx.size(0), ht*wd}, opts);
 
   for (int itr=0; itr<iterations; itr++) {
 
@@ -1398,13 +1400,21 @@ std::vector<torch::Tensor> ba_cuda(
       torch::Tensor m = (disps_sens.index({kx, "..."}) > 0).to(torch::TensorOptions().dtype(torch::kFloat32)).view({-1, ht*wd});
       torch::Tensor C = accum_cuda(Cii, ii, kx) + m * alpha + (1 - m) * eta.view({-1, ht*wd});
       torch::Tensor w = accum_cuda(wi, ii, kx) - m * alpha * (disps.index({kx, "..."}) - disps_sens.index({kx, "..."})).view({-1, ht*wd});
-      torch::Tensor Q = 1.0 / C;
+      Q = 1.0 / C;  // jhuai (K, ht * wd), K is number of unique frames
 
       torch::Tensor Ei = accum_cuda(Eii.view({num, 6*ht*wd}), ii, ts).view({t1-t0, 6, ht*wd});
-      torch::Tensor E = torch::cat({Ei, Eij}, 0);
+      torch::Tensor E = torch::cat({Ei, Eij}, 0);  // jhuai: (K+num, 6, HW)
 
       SparseBlock S = schur_block(E, Q, w, ii_exp, jj_exp, kk_exp, t0, t1);
-      dx = (A - S).solve(lm, ep);
+      SparseBlock HdP = A - S;
+      dx = HdP.solve(lm, ep);
+
+      // TODO: compute the rigorous delta_cov, referring to Probabilistic volumetric fusion for dense monocular SLAM eq 5.
+      // LL' = H/P
+      // L_inv = L^-1 * I
+      // F = torch.matmul(L_inv, E_sum * Q) # D*P X K*HW
+      // F2 = torch.pow(F, 2)
+      // delta_cov = F2.sum(dim=0) # K*HW
 
       torch::Tensor ix = jj_exp - t0;
       torch::Tensor dw = torch::zeros({ix.size(0), ht*wd}, opts);
@@ -1415,7 +1425,7 @@ std::vector<torch::Tensor> ba_cuda(
         ix.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
         dw.packed_accessor32<float,2,torch::RestrictPtrTraits>());
 
-      dz = Q * (w - accum_cuda(dw, ii_exp, kx));
+      dz = Q * (w - accum_cuda(dw, ii_exp, kx));  // jhuai: Q, w, dz are of shape (K, ht*wd)
 
       if (!depth_only){
         // update poses
@@ -1433,7 +1443,7 @@ std::vector<torch::Tensor> ba_cuda(
 
   }
 
-  return {dx, dz};
+  return {dx, dz, Q+delta_cov};
 }
 
 

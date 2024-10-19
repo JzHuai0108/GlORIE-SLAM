@@ -181,6 +181,8 @@ class FactorGraph:
             self.video.poses[ix] = self.video.poses[ix+1]
             self.video.disps[ix] = self.video.disps[ix+1]
             self.video.disps_up[ix] = self.video.disps_up[ix+1]
+            self.video.depths_cov[ix] = self.video.depths_cov[ix+1]
+            self.video.depths_cov_up[ix] = self.video.depths_cov_up[ix+1]
             self.video.intrinsics[ix] = self.video.intrinsics[ix+1]
             self.video.depth_scale[ix] = self.video.depth_scale[ix+1]
             self.video.depth_shift[ix] = self.video.depth_shift[ix+1]
