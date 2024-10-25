@@ -5,7 +5,7 @@ import faiss
 import faiss.contrib.torch_utils
 from src.utils.common import setup_seed, get_rays_from_uv, update_cam
 from src.utils.datasets import load_mono_depth
-import droid_backends
+import droid_backends_glorie_slam as droid_backends
 from lietorch import SE3
 
 def get_scale(depth_prev, depth_curr):

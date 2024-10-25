@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import lietorch
-import droid_backends
+import droid_backends_glorie_slam as droid_backends
 import src.geom.ba
 from torch.multiprocessing import Value
 

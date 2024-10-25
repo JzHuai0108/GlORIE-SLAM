@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-import droid_backends
+import droid_backends_glorie_slam as droid_backends
 
 
 class CorrSampler(torch.autograd.Function):

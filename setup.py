@@ -5,9 +5,9 @@ import os.path as osp
 ROOT = osp.dirname(osp.abspath(__file__))
 
 setup(
-    name='droid_backends',
+    name='droid_backends_glorie_slam',
     ext_modules=[
-        CUDAExtension('droid_backends',
+        CUDAExtension('droid_backends_glorie_slam',
             include_dirs=[osp.join(ROOT, 'thirdparty/eigen')],
             sources=[
                 'src/lib/droid.cpp',
