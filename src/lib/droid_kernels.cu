@@ -173,6 +173,7 @@ expSE3(const float *xi, float* t, float* q) {
     t[2] += b * tau[2];
   }
 }
+
 __global__ void projective_transform_kernel(
     const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> target,
     const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> weight,
@@ -1354,8 +1355,6 @@ std::vector<torch::Tensor> ba_cuda(
   torch::Tensor Eij = torch::zeros({num, 6, ht*wd}, opts);  // jhuai: the Hessian blocks for frame j and disparity
   torch::Tensor Cii = torch::zeros({num, ht*wd}, opts);  // jhuai: the Hessian blocks for disparity
   torch::Tensor wi = torch::zeros({num, ht*wd}, opts);  // jhuai: the gradient vectors for disparity
-  torch::Tensor delta_cov = torch::zeros({kx.size(0), ht*wd}, opts);
-  torch::Tensor Q = torch::zeros({kx.size(0), ht*wd}, opts);
 
   for (int itr=0; itr<iterations; itr++) {
 
@@ -1400,7 +1399,7 @@ std::vector<torch::Tensor> ba_cuda(
       torch::Tensor m = (disps_sens.index({kx, "..."}) > 0).to(torch::TensorOptions().dtype(torch::kFloat32)).view({-1, ht*wd});
       torch::Tensor C = accum_cuda(Cii, ii, kx) + m * alpha + (1 - m) * eta.view({-1, ht*wd});
       torch::Tensor w = accum_cuda(wi, ii, kx) - m * alpha * (disps.index({kx, "..."}) - disps_sens.index({kx, "..."})).view({-1, ht*wd});
-      Q = 1.0 / C;  // jhuai (K, ht * wd), K is number of unique frames
+      torch::Tensor Q = 1.0 / C;  // jhuai (K, ht * wd), K is number of unique frames
 
       torch::Tensor Ei = accum_cuda(Eii.view({num, 6*ht*wd}), ii, ts).view({t1-t0, 6, ht*wd});
       torch::Tensor E = torch::cat({Ei, Eij}, 0);  // jhuai: (K+num, 6, HW)
@@ -1408,13 +1407,6 @@ std::vector<torch::Tensor> ba_cuda(
       SparseBlock S = schur_block(E, Q, w, ii_exp, jj_exp, kk_exp, t0, t1);
       SparseBlock HdP = A - S;
       dx = HdP.solve(lm, ep);
-
-      // TODO: compute the rigorous delta_cov, referring to Probabilistic volumetric fusion for dense monocular SLAM eq 5.
-      // LL' = H/P
-      // L_inv = L^-1 * I
-      // F = torch.matmul(L_inv, E_sum * Q) # D*P X K*HW
-      // F2 = torch.pow(F, 2)
-      // delta_cov = F2.sum(dim=0) # K*HW
 
       torch::Tensor ix = jj_exp - t0;
       torch::Tensor dw = torch::zeros({ix.size(0), ht*wd}, opts);
@@ -1443,7 +1435,7 @@ std::vector<torch::Tensor> ba_cuda(
 
   }
 
-  return {dx, dz, Q+delta_cov};
+  return {dx, dz};
 }
 
 
@@ -1551,4 +1543,441 @@ torch::Tensor iproj_cuda(
 
   return points;
 
+}
+
+// Doesn't have concept of kf0, kf1! Flows are hence computed outside optimization window as well.
+__global__ void projective_transform_kernelx(
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> target,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> weight,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,
+    const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> disps,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> intrinsics,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> extrinsics, // cam_T_imu
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,
+    torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> Hs,
+    torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> vs,
+    torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> Eiz,
+    torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> Ejz,
+    torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> Cii,
+    torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> bz)
+{
+  const int M = blockIdx.x; // Number of flow measurements.
+  const int thread_id = threadIdx.x;
+
+  const int ht = disps.size(1);
+  const int wd = disps.size(2);
+
+  int ix = static_cast<int>(ii[M]);
+  int jx = static_cast<int>(jj[M]);
+
+  __shared__ float fx;
+  __shared__ float fy;
+  __shared__ float cx;
+  __shared__ float cy;
+
+  __shared__ float ti[3], tj[3], tij[3];
+  __shared__ float qi[4], qj[4], qij[4];
+
+  __shared__ float cam_T_body_tij[3];
+  __shared__ float cam_T_body_qij[4];
+
+  // load intrinsics from global memory
+  if (thread_id == 0) {
+    fx = intrinsics[0];
+    fy = intrinsics[1];
+    cx = intrinsics[2];
+    cy = intrinsics[3];
+
+    // Hard-code extrinsics for now! cam_T_imu
+    cam_T_body_tij[0] = extrinsics[0]; // 0.0652229;
+    cam_T_body_tij[1] = extrinsics[1]; // -0.0207064;
+    cam_T_body_tij[2] = extrinsics[2]; // -0.0080546;
+
+    cam_T_body_qij[0] = extrinsics[3]; // 0.00770718; //x
+    cam_T_body_qij[1] = extrinsics[4]; // -0.01049932;//y
+    cam_T_body_qij[2] = extrinsics[5]; // -0.7017528; //z
+    cam_T_body_qij[3] = extrinsics[6]; // 0.71230146; //w
+  }
+
+  __syncthreads();
+
+  if (ix == jx) {
+    // stereo frames
+    if (thread_id == 0) {
+      tij[0] =  -0.1; // Baseline...
+      tij[1] =     0;
+      tij[2] =     0;
+      qij[0] =     0;
+      qij[1] =     0;
+      qij[2] =     0;
+      qij[3] =     1;
+    }
+  } else {
+    // mono frames
+
+    // load poses from global memory
+    if (thread_id < 3) {
+      ti[thread_id] = poses[ix][thread_id];
+      tj[thread_id] = poses[jx][thread_id];
+    }
+
+    if (thread_id < 4) {
+      qi[thread_id] = poses[ix][thread_id+3];
+      qj[thread_id] = poses[jx][thread_id+3];
+    }
+
+    __syncthreads();
+
+    if (thread_id == 0) {
+      relSE3(ti, qi, tj, qj, tij, qij);
+    }
+  }
+
+  __syncthreads();
+
+  //points 
+  float Xi[4];
+  float Xj[4];
+
+  // jacobians
+  float Jx[12];
+  float Jz;
+
+  float* Ji = &Jx[0];
+  float* Jj = &Jx[6];
+
+  // hessians
+  // 12*(12+1)/2 = 78
+  // These are the upper triangular elements of the hessian matrix contributed by the point to the camera blocks.
+  // H = [Hii Hij; Hji Hjj], where Hii and Hjj are symmetric. The actual hessian is the summation of all these blocks from the points.
+  float hij[12*(12+1)/2]; // Upper triangular part of the Hessian only.
+
+  float vi[6], vj[6];
+
+  // Init hij's values to zero...
+  int l;
+  for (l=0; l<12*(12+1)/2; l++) {
+    hij[l] = 0;
+  }
+
+  // Init vi, vj to zero.
+  for (int n=0; n<6; n++) {
+    vi[n] = 0;
+    vj[n] = 0;
+  }
+
+  __syncthreads();
+
+  // AKA: for (size_t k = threadIdx.x; k<n; k += blockDim.x)
+  GPU_1D_KERNEL_LOOP(k, ht*wd) { // AKA: loops over all pixels in the image by dividing chunks of pixels to threads.
+
+    const int i = k / wd;
+    const int j = k % wd;
+
+    // We are at pixel (u,v) in the image of keyframe ix, and flow goes from ix to jx
+    const float u = static_cast<float>(j);
+    const float v = static_cast<float>(i);
+    
+    // homogenous coordinates
+    Xi[0] = (u - cx) / fx;
+    Xi[1] = (v - cy) / fy;
+    Xi[2] = 1;
+    Xi[3] = disps[ix][i][j]; // ix is the keyframe index.
+
+    // transform homogenous point from keyframe ix to keyframe jx, for pixel (u,v)
+    actSE3(tij, qij, Xi, Xj);
+
+    const float x = Xj[0];
+    const float y = Xj[1];
+    const float h = Xj[3];
+
+    const float d = (Xj[2] < MIN_DEPTH) ? 0.0 : 1.0 / Xj[2];
+    const float d2 = d * d;
+
+    // Get the weight of the pixel (u,v)==(j,i) for the flow measurement number `block_id'
+    // TODO: why the 0.001 !? Shouldn't it be Xj[3]?
+    float weight_u = (Xj[2] < MIN_DEPTH) ? 0.0 : .001 * weight[M][0][i][j];
+    float weight_v = (Xj[2] < MIN_DEPTH) ? 0.0 : .001 * weight[M][1][i][j];
+
+    // Calculate the difference between the expected and current flow
+    const float residual_u = target[M][0][i][j] - (fx * d * x + cx);
+    const float residual_v = target[M][1][i][j] - (fy * d * y + cy);
+
+    // Populate hessian and information vectors with jacobians
+    // [H  Eii/Eij]
+    // [   Cii]
+    ////////////// x - coordinate 
+
+    // x - coordinate of D(p')/D(psi_j)
+
+    // Jacobian of reprojection function of u-coord of pixel wrt depth Z = 1/d
+    // 1/d = Z; d2 = 1/Z^2; x = X; tij[0] = tx; tij[2] = tz;
+    // Jz = fx * 1/Z * tx - fx * X/Z^2 * tz
+    Jz = fx * (tij[0] * d - tij[2] * (x * d2)); // this is a scalar...
+
+    // The C block is stored as a MxHW matrix, where M is the number of measurements, and HW is the number of pixels.
+    Cii[M][k] = weight_u * Jz * Jz;
+    bz[M][k] = weight_u * residual_u * Jz;
+
+    if (ix == jx) weight_u = 0; // for stereo
+
+    Jj[0] = fx * (h*d);
+    Jj[1] = fx * 0.0;
+    Jj[2] = fx * (-x*h*d2);
+    Jj[3] = fx * (-x*y*d2);
+    Jj[4] = fx * (1.0 + x*x*d2);
+    Jj[5] = fx * (-y*d);
+
+    adjSE3(tij, qij, Jj, Ji);
+    for (int n=0; n<6; n++) Ji[n] *= -1.0;
+
+    // if cam_T_body:
+    adjSE3(cam_T_body_tij, cam_T_body_qij, Jj, Jj);
+    adjSE3(cam_T_body_tij, cam_T_body_qij, Ji, Ji);
+
+    // To get right jacobians wrt world_T_body
+    for (int n=0; n<6; n++) Jj[n] *= -1.0;
+    for (int n=0; n<6; n++) Ji[n] *= -1.0;
+
+    // To get [wx wy wz tx ty tz] (gtsam) instead of [tx ty tz wx wy wz] (droid)
+    float Jj_copy[6];
+    for (int n=0; n<6; n++) Jj_copy[n] = Jj[n];
+    Jj[0] = Jj_copy[3];
+    Jj[1] = Jj_copy[4];
+    Jj[2] = Jj_copy[5];
+    Jj[3] = Jj_copy[0];
+    Jj[4] = Jj_copy[1];
+    Jj[5] = Jj_copy[2];
+    float Ji_copy[6];
+    for (int n=0; n<6; n++) Ji_copy[n] = Ji[n];
+    Ji[0] = Ji_copy[3];
+    Ji[1] = Ji_copy[4];
+    Ji[2] = Ji_copy[5];
+    Ji[3] = Ji_copy[0];
+    Ji[4] = Ji_copy[1];
+    Ji[5] = Ji_copy[2];
+
+    // Compute contributions to the Hessian for the pose to pose block
+    l=0;
+    for (int n=0; n<12; n++) {
+      for (int m=0; m<=n; m++) { // we only compute the upper diagonal, so stop at m at n...
+        hij[l] += weight_u * Jx[n] * Jx[m];
+        l++;
+      }
+    }
+
+    for (int n=0; n<6; n++) {
+      // weight_u = 0 for stereo
+      vi[n] += weight_u * residual_u * Ji[n];
+      vj[n] += weight_u * residual_u * Jj[n];
+
+      Eiz[M][n][k] = weight_u * Jz * Ji[n]; // Jz is a scalar
+      Ejz[M][n][k] = weight_u * Jz * Jj[n];
+    }
+
+    ////////////// y - coordinate of D(p')/D(psi_j)
+
+    // TODO: Parallelize the calculations above and below this line...
+
+    // y - coordinate of D(p')/D(psi_j)
+    Jz = fy * (tij[1] * d - tij[2] * (y * d2));
+    Cii[M][k] += weight_v * Jz * Jz;
+    bz[M][k] += weight_v * residual_v * Jz;
+
+    if (ix == jx) weight_v = 0; // For stereo
+
+    Jj[0] = fy * 0;
+    Jj[1] = fy * (h*d);
+    Jj[2] = fy * (-y*h*d2);
+    Jj[3] = fy * (-1 - y*y*d2);
+    Jj[4] = fy * (x*y*d2);
+    Jj[5] = fy * (x*d);
+
+    adjSE3(tij, qij, Jj, Ji);
+    for (int n=0; n<6; n++) Ji[n] *= -1.0;
+
+    // if cam_T_body:
+    adjSE3(cam_T_body_tij, cam_T_body_qij, Jj, Jj);
+    adjSE3(cam_T_body_tij, cam_T_body_qij, Ji, Ji);
+
+    // To get right jacobians wrt world_T_body
+    for (int n=0; n<6; n++) Jj[n] *= -1.0;
+    for (int n=0; n<6; n++) Ji[n] *= -1.0;
+
+    // To get [wx wy wz tx ty tz] (gtsam) instead of [tx ty tz wx wy wz] (droid)
+    for (int n=0; n<6; n++) Jj_copy[n] = Jj[n];
+    Jj[0] = Jj_copy[3];
+    Jj[1] = Jj_copy[4];
+    Jj[2] = Jj_copy[5];
+    Jj[3] = Jj_copy[0];
+    Jj[4] = Jj_copy[1];
+    Jj[5] = Jj_copy[2];
+    for (int n=0; n<6; n++) Ji_copy[n] = Ji[n];
+    Ji[0] = Ji_copy[3];
+    Ji[1] = Ji_copy[4];
+    Ji[2] = Ji_copy[5];
+    Ji[3] = Ji_copy[0];
+    Ji[4] = Ji_copy[1];
+    Ji[5] = Ji_copy[2];
+
+    // Compute contributions to the Hessian
+    l=0;
+    for (int n=0; n<12; n++) {
+      for (int m=0; m<=n; m++) {
+        hij[l] += weight_v * Jx[n] * Jx[m];
+        l++;
+      }
+    }
+
+    for (int n=0; n<6; n++) {
+      // weight_v = 0 for stereo
+      vi[n] += weight_v * residual_v * Ji[n];
+      vj[n] += weight_v * residual_v * Jj[n];
+
+      // Cross-contributions to the Hessian for the pose and depth blocks
+      // H = [B, E; Et, C], these are the E contributions for pixel (u,v) of flow from i to j.
+      // The size of the matrices are M*D*HW, where M are the number of measurements, D the dimensionality of the pose,
+      Eiz[M][n][k] += weight_v * Jz * Ji[n];
+      Ejz[M][n][k] += weight_v * Jz * Jj[n];
+    }
+
+    // Done with per-pixel update?
+  }
+
+  __syncthreads();
+
+  __shared__ float sdata[THREADS];
+  for (int n=0; n<6; n++) {
+    sdata[threadIdx.x] = vi[n];
+    blockReduce(sdata);
+    if (threadIdx.x == 0) {
+      vs[0][M][n] = sdata[0];
+    }
+
+    __syncthreads();
+
+    sdata[threadIdx.x] = vj[n];
+    blockReduce(sdata);
+    if (threadIdx.x == 0) {
+      vs[1][M][n] = sdata[0];
+    }
+
+  }
+
+  l=0;
+  for (int n=0; n<12; n++) {
+    for (int m=0; m<=n; m++) {
+      sdata[threadIdx.x] = hij[l];
+      blockReduce(sdata);
+
+      if (threadIdx.x == 0) {
+        if (n<6 && m<6) {
+          Hs[0][M][n][m] = sdata[0];
+          Hs[0][M][m][n] = sdata[0];
+        }
+        else if (n >=6 && m<6) {
+          Hs[1][M][m][n-6] = sdata[0];
+          Hs[2][M][n-6][m] = sdata[0];
+        }
+        else {
+          Hs[3][M][n-6][m-6] = sdata[0];
+          Hs[3][M][m-6][n-6] = sdata[0];
+        }
+      }
+
+      l++;
+    }
+  }
+}
+
+
+// Computes reduced camera matrix:  H_c/H_p
+// Aka the schur complement of the cameras wrt points
+// Eigen::MatrixXd is a dynamic 2D matrix of doubles.
+std::vector<torch::Tensor>
+reduced_camera_matrix_cuda(
+    torch::Tensor poses,
+    torch::Tensor disps,
+    torch::Tensor intrinsics,
+    torch::Tensor extrinsics,
+    torch::Tensor disps_sens,
+    torch::Tensor targets,
+    torch::Tensor weights,
+    torch::Tensor eta,
+    torch::Tensor ii, // Contains active AND inactive keyframes
+    torch::Tensor jj, // Contains active AND inactive keyframes
+    const int kf0,    // Min active keyframe
+    const int kf1)    // Max active keyframe
+{
+  auto opts = poses.options();
+  const int M = ii.size(0); // number of measurements
+  const int ht = disps.size(1);
+  const int wd = disps.size(2);
+
+  torch::Tensor ts = torch::arange(kf0, kf1).to(torch::kCUDA);
+  torch::Tensor ii_expanded = torch::cat({ts, ii}, 0);
+  torch::Tensor jj_expanded = torch::cat({ts, jj}, 0);
+
+  std::tuple<torch::Tensor, torch::Tensor> ii_unique = 
+    torch::_unique(ii_expanded, true, true);
+
+  torch::Tensor ii_kf_ids = std::get<0>(ii_unique);
+  torch::Tensor kk_exp = std::get<1>(ii_unique); // same size as ii_expanded, ii_expanded[i] == ii_kf_ids[kk_exp[i]]
+    
+  // initialize buffers
+  torch::Tensor Hs = torch::zeros({4, M, 6, 6}, opts);
+  torch::Tensor vs = torch::zeros({2, M, 6}, opts);
+  torch::Tensor Eiz = torch::zeros({M, 6, ht*wd}, opts);
+  torch::Tensor Ejz = torch::zeros({M, 6, ht*wd}, opts);
+  torch::Tensor Cii = torch::zeros({M, ht*wd}, opts);
+  torch::Tensor wi = torch::zeros({M, ht*wd}, opts);
+
+  // Here we should iterate...
+  // By iterating on the whole function, we are re-allocating buffers all the time...
+  projective_transform_kernelx<<<M, THREADS>>>(
+    targets.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+    weights.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+    poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+    disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+    intrinsics.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+    extrinsics.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+    ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+    jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+    Hs.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+    vs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+    Eiz.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+    Ejz.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+    Cii.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+    wi.packed_accessor32<float,2,torch::RestrictPtrTraits>());
+
+  // pose x pose block
+  SparseBlock A(kf1 - kf0, 6); // (N, M=6) -> A = (N*M, N*M), b = (N*M)
+
+  A.update_lhs(Hs.reshape({-1, 6, 6}), 
+      torch::cat({ii, ii, jj, jj}) - kf0, 
+      torch::cat({ii, jj, ii, jj}) - kf0);
+
+  A.update_rhs(vs.reshape({-1, 6}), 
+      torch::cat({ii, jj}) - kf0);
+
+  // add depth residual if there are depth sensor measurements
+  const float alpha = 0.05;
+  torch::Tensor m = (disps_sens.index({ii_kf_ids, "..."}) > 0).to(torch::TensorOptions().dtype(torch::kFloat32)).view({-1, ht*wd});
+  torch::Tensor C = accum_cuda(Cii, ii, ii_kf_ids) + m * alpha + (1 - m) * eta.view({-1, ht*wd}); // add alpha if sensed depth, eta if not.
+  torch::Tensor w = accum_cuda(wi, ii, ii_kf_ids)  - m * alpha * (disps.index({ii_kf_ids, "..."}) - disps_sens.index({ii_kf_ids, "..."})).view({-1, ht*wd});
+  torch::Tensor Q = 1.0 / C;
+
+  // Accumulate all contributions from the different flows to get the Eii block, that constraints the i-th camera depth
+  torch::Tensor Ei = accum_cuda(Eiz.view({M, 6*ht*wd}), ii, ts).view({kf1-kf0, 6, ht*wd}); 
+  torch::Tensor E = torch::cat({Ei, Ejz}, 0);
+
+  SparseBlock S = schur_block(E, Q, w, ii_expanded, jj_expanded, kk_exp, kf0, kf1);
+
+  // Return (A-S), the reduced camera matrix, and solve it via GTSAM together with IMU
+  SparseBlock rcm = (A - S);//dx = (A - S).solve(lm, ep);
+  // We also want the inverse of rcm! Because it is our marginal covariance!
+  // But we rather would take the covariance of the rcm with the IMU...
+  auto tuple = rcm.get_dense();
+  return {std::get<0>(tuple), std::get<1>(tuple), Q, E, w};
 }

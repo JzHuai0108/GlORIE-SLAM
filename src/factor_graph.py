@@ -251,7 +251,7 @@ class FactorGraph:
 
             # bundle adjustment
             self.video.ba(target, weight, damping, ii, jj, t0, t1, 
-                iters=itrs, lm=1e-4, ep=0.1, motion_only=motion_only,opt_type=opt_type)
+                iters=itrs, lm=1e-4, ep=0.1, motion_only=motion_only, opt_type=opt_type, depth_cov=True)
         
             self.video.upsample(torch.unique(self.ii), upmask)
 
@@ -308,7 +308,7 @@ class FactorGraph:
 
             # dense bundle adjustment            
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, 
-                iters=itrs, lm=1e-5, ep=1e-2, motion_only=False, opt_type=opt_type)
+                iters=itrs, lm=1e-5, ep=1e-2, motion_only=False, opt_type=opt_type, depth_cov=False)
 
 
     def add_neighborhood_factors(self, t0, t1, r=3):

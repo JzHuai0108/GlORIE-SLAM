@@ -57,6 +57,21 @@ std::vector<torch::Tensor> ba_cuda(
     const bool motion_only,
     const bool depth_only);
 
+std::vector<torch::Tensor>
+reduced_camera_matrix_cuda(
+    torch::Tensor poses,
+    torch::Tensor disps,
+    torch::Tensor intrinsics,
+    torch::Tensor extrinsics,
+    torch::Tensor disps_sens,
+    torch::Tensor targets,
+    torch::Tensor weights,
+    torch::Tensor eta,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    const int t0,
+    const int t1);
+
 std::vector<torch::Tensor> corr_index_cuda_forward(
   torch::Tensor volume,
   torch::Tensor coords,
@@ -118,6 +133,35 @@ std::vector<torch::Tensor> ba(
 
 }
 
+std::vector<torch::Tensor>
+reduced_camera_matrix(
+    torch::Tensor poses,
+    torch::Tensor disps,
+    torch::Tensor intrinsics,
+    torch::Tensor extrinsics,
+    torch::Tensor disps_sens,
+    torch::Tensor targets,
+    torch::Tensor weights,
+    torch::Tensor eta,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    const int t0,
+    const int t1) {
+
+  CHECK_INPUT(poses);
+  CHECK_INPUT(disps);
+  CHECK_INPUT(intrinsics);
+  CHECK_INPUT(extrinsics);
+  CHECK_INPUT(disps_sens);
+  CHECK_INPUT(targets);
+  CHECK_INPUT(weights);
+  CHECK_INPUT(eta); 
+  CHECK_INPUT(ii);
+  CHECK_INPUT(jj);
+
+  return reduced_camera_matrix_cuda(poses, disps, intrinsics, extrinsics, disps_sens, targets, weights,
+                 eta, ii, jj, t0, t1);
+}
 
 torch::Tensor frame_distance(
     torch::Tensor poses,
@@ -239,6 +283,7 @@ torch::Tensor depth_filter(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // bundle adjustment kernels
   m.def("ba", &ba, "bundle adjustment");
+  m.def("reduced_camera_matrix", &reduced_camera_matrix, "reduced camera matrix");
   m.def("frame_distance", &frame_distance, "frame_distance");
   m.def("projmap", &projmap, "projmap");
   m.def("depth_filter", &depth_filter, "depth_filter");
