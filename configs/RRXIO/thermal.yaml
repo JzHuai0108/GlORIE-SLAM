@@ -15,7 +15,7 @@ mapping:
 setting: demo
 
 data:
-  input_folder: "/media/pi/BackupPlus/jhuai/data/rrxio/irs_rtvi_datasets_2021/mocap_easy"
+  input_folder: "datasets/irs_rtvi_datasets_2021/mocap_easy"
   modality: 'thermal'
 cam:
   raw:

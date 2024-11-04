@@ -1,0 +1,27 @@
+inherit_from: ./configs/VIVID/vivid.yaml
+scene: outdoor_robust_day1
+only_tracking: False
+offline_mapping: False
+offline_video: video.npz
+wandb: False
+
+stride: 2
+max_frames: -1
+
+mapping:
+  iters: 150
+
+setting: demo
+
+data:
+  input_folder: datasets/vividpp/outdoor_robust_day1
+  modality: visual
+
+cam:  #intrinsic is different per scene in TUM, this cam does not have distortion
+  H: 480
+  W: 640
+  fx: 530.89678934
+  fy: 532.74953425
+  cx: 323.86088462
+  cy: 239.91265484
+

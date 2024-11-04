@@ -1,5 +1,5 @@
 verbose: True
-dataset: 'rrxio'
+dataset: 'vivid'
 stride: 1
 setting: median_filter
 
@@ -14,11 +14,11 @@ mapping:
   iters: 300
 
 tracking:
-  buffer: 800
+  buffer: 600
   beta: 0.75
   warmup: 12
   motion_filter:
-    thresh: 4.0
+    thresh: 4.0  
   multiview_filter:
     thresh: 0.03  
     visible_num: 2  
@@ -43,12 +43,12 @@ tracking:
     BA_type: "DBA"
     normalize: False
 
-cam:
+cam:  #NOTE: intrinsic is different per scene in TUM
   # refer to https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect
   png_depth_scale: 500.0 #for depth image in png format
   ### target/output camera settings, camera_size -> resize -> crop -> target_size
-  H_edge: 0
-  W_edge: 0
+  H_edge: 8
+  W_edge: 8
   H_out: 384
   W_out: 512
 
@@ -58,4 +58,4 @@ mono_prior:
   predict_online: True
 
 data:
-  output: output/RRXIO
+  output: output/VIVID
