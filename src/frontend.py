@@ -113,8 +113,8 @@ class Frontend:
 
         with self.video.get_lock():
             self.video.set_dirty(0, self.t1)
-
-        self.graph.rm_factors(self.graph.ii < self.warmup-4, store=True)
+        # jhuai: We also remove those proximity factors that violate the ii.min() == jj.min() assumption of depth cov recovery.
+        self.graph.rm_factors((self.graph.ii < self.warmup-4) | (self.graph.jj < self.warmup - 4), store=True)
 
     def __call__(self):
         """ main update """
