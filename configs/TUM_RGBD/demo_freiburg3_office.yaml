@@ -1,4 +1,4 @@
-inherit_from: ./configs/TUM_RGBD/tum.yaml
+inherit_from: ./nerf_vo/thirdparty/GlORIE_SLAM/configs/TUM_RGBD/tum.yaml
 scene: freiburg3_office
 only_tracking: False
 offline_mapping: False

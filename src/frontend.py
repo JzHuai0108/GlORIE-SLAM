@@ -118,14 +118,18 @@ class Frontend:
 
     def __call__(self):
         """ main update """
-
+        dirty_index = torch.empty(0, dtype=torch.int32)
         # do initialization
         if not self.is_initialized and self.video.counter.value == self.warmup:
             self.__initialize()
+            dirty_index, = torch.where(self.video.dirty.clone())
             self.video.update_valid_depth_mask()
-            
+
         # do update
         elif self.is_initialized and self.t1 < self.video.counter.value:
             self.__update()
+            dirty_index, = torch.where(self.video.dirty.clone())
             self.video.update_valid_depth_mask()
-        
+
+        return dirty_index
+
